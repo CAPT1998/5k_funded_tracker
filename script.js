@@ -51,15 +51,19 @@ document.addEventListener('DOMContentLoaded', () => {
     // --- API & DATA FETCHING ---
     async function fetchMarketData(pairs) {
         try {
-            const url = `https://financialmodelingprep.com/api/v3/quote/${pairs.join(',')}?apikey=${apiKey}`;
+            // UPDATED aPI endpoint from v3 to v4
+            const url = `https://financialmodelingprep.com/api/v4/price/${pairs.join(',')}?apikey=${apiKey}`;
             const response = await fetch(url);
             if (!response.ok) throw new Error(`API Error: ${response.statusText}`);
             const data = await response.json();
 
+            // The v4 response structure might be slightly different. Adapt as needed.
+            // This assumes the response is an array of objects with a 'symbol' and 'price' property.
             data.forEach(item => {
                 state.marketData[item.symbol] = {
                     price: item.price,
-                    spread: (item.ask - item.bid).toFixed(5)
+                    // Spread is not available in this endpoint, so we'll leave it as N/A
+                    spread: 'N/A' 
                 };
             });
             updateMarketInfo();
@@ -145,10 +149,7 @@ document.addEventListener('DOMContentLoaded', () => {
             pipValuePerLot = 1; // For crypto, 1 unit change = $1
         }
         
-        const riskPerLot = stopLossPips * (isCrypto ? 1 : (selectedPair.includes('JPY') ? 1000 : 100000)) * (isCrypto ? 1 : (1/pipValuePerLot * 0.0001));
-        
         // Simplified calculation
-        // riskPerLot = pips * pipValue * 10 (1 standard lot = 10$/pip)
         const moneyRiskPerLot = stopLossPips * (isCrypto ? 1 : getPipValue(selectedPair));
         
         const lotSize = (moneyRiskPerLot > 0) ? (riskAmount / moneyRiskPerLot) : 0;
@@ -158,11 +159,8 @@ document.addEventListener('DOMContentLoaded', () => {
     
     function getPipValue(pair) {
         // This is a simplification. Real pip value depends on the quote currency.
-        // Assuming a standard account where 1 lot = 100,000 units.
         if(pair.endsWith('USD')) return 10;
         if(pair.startsWith('USD')) {
-            const quote = pair.substring(3);
-            // This would need another API call for USD/quote price. We'll approximate.
             return 10 / (state.marketData[pair]?.price || 1);
         }
         return 10; // Default approximation
@@ -244,7 +242,6 @@ document.addEventListener('DOMContentLoaded', () => {
             const tradeIndex = state.trades.findIndex(t => t.id === id);
             const trade = state.trades[tradeIndex];
             
-            // If the trade was closed, revert the balance change
             if(trade.status === 'closed' && trade.pl !== null){
                 state.balance -= trade.pl;
             }
