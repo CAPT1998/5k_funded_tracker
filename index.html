@@ -126,15 +126,14 @@
       // if forex major
       if(MAJORS.includes(sym)){
         const base = sym.slice(0,3); const quote = sym.slice(3)
-        try{const resp = await fetch(`https://api.exchangerate.host/convert?from=${base}&to=${quote}`)
-          .then(r=>r.json())
+        try{
+          const resp = await fetch(`https://api.exchangerate.host/convert?from=${base}&to=${quote}`)
+            .then(r=>r.json())
           setPrices(p=>({...p,[sym]:resp.result}))
         }catch(e){console.warn(e)}
       } else {
         // try coingecko lookup by symbol
         try{
-          const cg = await fetch(`https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&ids=&symbols=${sym.toLowerCase()}`)
-          // fallback: try market endpoint by coin id
           // simpler: find from symbols list cached
           const found = symbols.find(s=>s.symbol===sym && s.type==='crypto')
           if(found){
