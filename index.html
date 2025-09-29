@@ -1,0 +1,334 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>FundingPips Trade Tracker</title>
+  <style>
+    /* Minimal styling so it looks okay on GitHub Pages without Tailwind build */
+    :root{--bg:#0f172a;--card:#0b1220;--muted:#94a3b8;--accent:#06b6d4;--success:#10b981}
+    html,body,#root{height:100%;}
+    body{margin:0;font-family:Inter,ui-sans-serif,system-ui,Segoe UI,Roboto,"Helvetica Neue",Arial;background:linear-gradient(180deg,#071028 0%, #071633 100%);color:#e6eef6}
+    .container{max-width:1100px;margin:28px auto;padding:18px}
+    .card{background:rgba(255,255,255,0.03);border-radius:12px;padding:16px;margin-bottom:16px;box-shadow:0 6px 18px rgba(2,6,23,0.6)}
+    h1{font-size:20px;margin:0 0 8px}
+    label{display:block;font-size:12px;color:var(--muted);margin-bottom:6px}
+    select,input,button,textarea{font-size:14px;padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,0.06);background:transparent;color:inherit;outline:none}
+    .row{display:flex;gap:10px;align-items:center}
+    .col{flex:1}
+    table{width:100%;border-collapse:collapse;font-size:13px}
+    th,td{padding:8px;text-align:left;border-bottom:1px solid rgba(255,255,255,0.03)}
+    .muted{color:var(--muted)}
+    .btn{background:var(--accent);color:#021024;padding:8px 12px;border-radius:8px;border:none;cursor:pointer}
+    .danger{background:#ef4444}
+    .success{background:var(--success);color:#021024}
+    .small{font-size:12px;padding:6px}
+    .note{font-size:12px;color:var(--muted)}
+    .flex{display:flex;gap:8px;align-items:center}
+    .symbol-row{display:flex;justify-content:space-between;align-items:center}
+    .symbol-info{font-size:13px}
+    .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+    @media(max-width:900px){.grid{grid-template-columns:repeat(1,1fr)}}
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <!-- React via CDN + Babel for JSX. This is a single-file app you can drop into GitHub Pages as index.html -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/htm@3.0.4/dist/htm.umd.js"></script>
+  <script type="module">
+  import htm from 'https://unpkg.com/htm?module'
+  const html = htm.bind(React.createElement)
+  const {useState,useEffect,useMemo,useRef} = React
+
+  function useLocalStorage(key, initial) {
+    const [state, setState] = useState(()=>{
+      try{const raw = localStorage.getItem(key);return raw?JSON.parse(raw):initial}catch(e){return initial}
+    })
+    useEffect(()=>{localStorage.setItem(key,JSON.stringify(state))},[key,state])
+    return [state,setState]
+  }
+
+  function format(n){return typeof n==='number'?n.toLocaleString(undefined,{maximumFractionDigits:8}):n}
+
+  function parsePair(symbol){
+    // symbol like EURUSD or BTCUSD or BTC/USDT
+    const s = symbol.replace('/','').toUpperCase()
+    if(s.includes('-')) return {base:s.split('-')[0],quote:s.split('-')[1]}
+    // try 6 letter like EURUSD
+    if(s.length===6){return {base:s.slice(0,3),quote:s.slice(3,6)}}
+    // fallback split BTCUSD -> BTC USD
+    return {base:s.slice(0,3),quote:s.slice(3)}
+  }
+
+  function App(){
+    const MAJORS = ["EURUSD","GBPUSD","USDJPY","USDCHF","AUDUSD","USDCAD","NZDUSD"]
+    const [balance,setBalance] = useLocalStorage('fp_balance',5000)
+    const [trades,setTrades] = useLocalStorage('fp_trades',[])
+    const [symbols,setSymbols] = useState([]) // merged list of forex majors + top cryptos
+    const [selected,setSelected] = useState('EURUSD')
+    const [prices,setPrices] = useState({})
+    const [loading,setLoading] = useState(false)
+    const [riskPercent,setRiskPercent] = useState(1)
+    const [stopLossPips,setStopLossPips] = useState(20)
+    const [side,setSide] = useState('buy')
+    const [entryPrice,setEntryPrice] = useState('')
+    const [note,setNote] = useState('')
+
+    // static spread guesses (in pips for forex; as percent for crypto)
+    const spreadMap = useRef({EURUSD:0.8,GBPUSD:1.2,USDJPY:0.8,USDCHF:1.2,AUDUSD:1.0,USDCAD:1.1,NZDUSD:1.6})
+
+    useEffect(()=>{
+      // Build symbol list: majors + fetch top 40 cryptos from CoinGecko
+      async function load(){
+        setLoading(true)
+        try{
+          const cg = await fetch('https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=50&page=1&sparkline=false')
+            .then(r=>r.json())
+          const cryptos = cg.map(c=>({id:c.id, symbol:c.symbol.toUpperCase(),name:c.name,type:'crypto',price:c.current_price,spreadPercent:0.2,extra:c}))
+          const forex = MAJORS.map(s=>({id:s,name:s,type:'forex'}))
+          const merged = [...forex,...cryptos]
+          setSymbols(merged)
+
+          // preload prices for majors via exchangerate.host convert
+          const priceObj = {}
+          await Promise.all(MAJORS.map(async pair=>{
+            const base = pair.slice(0,3); const quote = pair.slice(3)
+            try{
+              const resp = await fetch(`https://api.exchangerate.host/convert?from=${base}&to=${quote}`)
+              const json = await resp.json()
+              priceObj[pair]=json.result
+            }catch(e){priceObj[pair]=null}
+          }))
+          // add cryptos fetched
+          cryptos.forEach(c=>priceObj[c.symbol]=c.price)
+          setPrices(priceObj)
+          setSelected(MAJORS[0])
+        }catch(e){console.error(e)}
+        setLoading(false)
+      }
+      load()
+    },[])
+
+    useEffect(()=>{
+      // live refresh every 30s for selected price update
+      const timer = setInterval(()=>{
+        if(!selected) return
+        refreshPrice(selected)
+      },30000)
+      return ()=>clearInterval(timer)
+    },[selected])
+
+    async function refreshPrice(sym){
+      if(!sym) return
+      // if forex major
+      if(MAJORS.includes(sym)){
+        const base = sym.slice(0,3); const quote = sym.slice(3)
+        try{const resp = await fetch(`https://api.exchangerate.host/convert?from=${base}&to=${quote}`)
+          .then(r=>r.json())
+          setPrices(p=>({...p,[sym]:resp.result}))
+        }catch(e){console.warn(e)}
+      } else {
+        // try coingecko lookup by symbol
+        try{
+          const cg = await fetch(`https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&ids=&symbols=${sym.toLowerCase()}`)
+          // fallback: try market endpoint by coin id
+          // simpler: find from symbols list cached
+          const found = symbols.find(s=>s.symbol===sym && s.type==='crypto')
+          if(found){
+            const fresh = await fetch(`https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&ids=${found.id}&order=market_cap_desc&per_page=1&page=1&sparkline=false`).then(r=>r.json())
+            if(fresh && fresh[0]) setPrices(p=>({...p,[sym]:fresh[0].current_price}))
+          }
+        }catch(e){console.warn(e)}
+      }
+    }
+
+    function getSpread(sym){
+      if(MAJORS.includes(sym)) return spreadMap.current[sym] ?? 1.0
+      // crypto: approximate spread percent of price
+      const s = symbols.find(x=>x.symbol===sym)
+      return s? (s.spreadPercent || 0.2) : 0.2
+    }
+
+    // pip size and pip value conversion to USD (per 1 standard lot)
+    async function pipValuePerLotUSD(sym){
+      // returns USD value of 1 pip for 1 standard lot (100000 units)
+      const {base,quote} = parsePair(sym)
+      const pipSize = quote==='JPY' ? 0.01 : 0.0001
+      const pipInQuote = pipSize * 100000 // e.g., 100000*0.0001 = 10 (quote currency)
+      // convert 1 unit of quote currency to USD
+      if(quote==='USD') return pipInQuote
+      try{
+        // use exchangerate.host to get quote -> USD
+        const resp = await fetch(`https://api.exchangerate.host/convert?from=${quote}&to=USD`).then(r=>r.json())
+        const rate = resp.result
+        if(rate) return pipInQuote * rate
+      }catch(e){console.warn('pip conv failed',e)}
+      return pipInQuote // fallback (will be wrong for non-USD quotes)
+    }
+
+    async function suggestLot(sym, stopPips, riskPct){
+      // return suggested lot size (standard lots) based on balance and stop loss (pips)
+      const riskAmount = (balance * (riskPct/100))
+      const pipValue = await pipValuePerLotUSD(sym)
+      const lot = riskAmount / (stopPips * pipValue)
+      return Math.max(0, lot)
+    }
+
+    async function handleOpen(){
+      if(!selected || !entryPrice) return alert('select symbol and entry price')
+      setLoading(true)
+      try{
+        const s = await suggestLot(selected, Number(stopLossPips), Number(riskPercent))
+        const trade = {
+          id:Date.now(),symbol:selected,side,entry:Number(entryPrice),stopLossPips:Number(stopLossPips),riskPercent:Number(riskPercent),suggestedLots:Math.round(s*100)/100,note,openTs:new Date().toISOString(),status:'open'
+        }
+        setTrades(t=>[trade,...t])
+        alert('Trade opened (saved locally)')
+      }catch(e){console.error(e);alert('failed to open')}
+      setLoading(false)
+    }
+
+    function handleClose(tradeId){
+      const tr = trades.find(t=>t.id===tradeId)
+      if(!tr) return
+      const closePrice = prompt('Enter close price (decimal)')
+      if(!closePrice) return
+      // compute pnl in USD
+      (async()=>{
+        const close = Number(closePrice)
+        const {base,quote} = parsePair(tr.symbol)
+        const baseUnits = tr.suggestedLots * 100000
+        // profit in quote currency per unit = (close-entry) * baseUnits
+        const priceDelta = (tr.side==='buy') ? (close - tr.entry) : (tr.entry - close)
+        const profitInQuote = priceDelta * baseUnits
+        // convert quote -> USD
+        let quoteToUsd = 1
+        if(quote!=='USD'){
+          try{const resp = await fetch(`https://api.exchangerate.host/convert?from=${quote}&to=USD`).then(r=>r.json()); quoteToUsd = resp.result || 1}catch(e){quoteToUsd=1}
+        }
+        const profitUsd = profitInQuote * quoteToUsd
+        const updated = trades.map(t=> t.id===tradeId?{...t,status:'closed',closePrice:close,closeTs:new Date().toISOString(),pnlUsd:profitUsd}:t)
+        setTrades(updated)
+        setBalance(b=>Math.round((b + profitUsd)*100)/100)
+        alert('Trade closed. PnL USD: '+profitUsd.toFixed(2))
+      })()
+    }
+
+    function removeTrade(id){if(!confirm('Delete this trade?'))return; setTrades(t=>t.filter(x=>x.id!==id))}
+
+    // UI pieces
+    const currentPrice = prices[selected]
+    const pipExample = selected && MAJORS.includes(selected) ? (selected.includes('JPY')?0.01:0.0001) : null
+
+    return html`<div className="container">
+      <div className="card">
+        <div className="row">
+          <div className="col">
+            <h1>FundingPips Tracker — $5k Challenge</h1>
+            <div className="muted">Balance (local only):</div>
+            <div style="display:flex;align-items:center;gap:12px;margin-top:6px">
+              <div style="font-size:20px;font-weight:700">$${format(balance)}</div>
+              <button className="small" onclick=${()=>{const v=prompt('Set new balance',''+balance); if(v!==null) setBalance(Number(v))}}>Set Balance</button>
+              <div className="note">Data stored in your browser (localStorage). Download JSON from below to backup.</div>
+            </div>
+          </div>
+          <div style="min-width:260px;text-align:right">
+            <div className="muted">Quick export / import</div>
+            <div style="margin-top:6px" className="flex">
+              <button className="small" onclick=${()=>{const data={balance,trades}; const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'}); const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download='fp-tracker-backup.json'; a.click();}}>Export JSON</button>
+              <button className="small" onclick=${()=>{const t=prompt('Paste previously exported JSON'); if(!t) return; try{const parsed=JSON.parse(t); setBalance(parsed.balance||5000); setTrades(parsed.trades||[]); alert('Imported')}catch(e){alert('invalid json')}}}>Import JSON</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="card">
+        <div className="row">
+          <div className="col">
+            <label>Select symbol</label>
+            <select value=${selected} onchange=${e=>setSelected(e.target.value)}>
+              ${symbols.map(s=> html`<option value=${s.type==='forex'?s.id:s.symbol}>${s.type==='forex'?s.id:(s.symbol+' — '+s.name)}</option>`) }
+            </select>
+            <div style="margin-top:8px" className="symbol-row">
+              <div className="symbol-info">
+                <div className="muted">Current price</div>
+                <div style="font-weight:700">${currentPrice?('$'+format(currentPrice)):'—'}</div>
+              </div>
+              <div className="symbol-info">
+                <div className="muted">Estimated spread</div>
+                <div style="font-weight:700">${MAJORS.includes(selected)?(getSpread(selected)+' pips'):(getSpread(selected)+'%')}</div>
+              </div>
+              <div style="text-align:right">
+                <div className="muted">Type</div>
+                <div style="font-weight:700">${MAJORS.includes(selected)?'Forex':'Crypto'}</div>
+              </div>
+            </div>
+          </div>
+          <div style="min-width:260px">
+            <label>Risk per trade (%)</label>
+            <input type="number" value=${riskPercent} min=0.01 step=0.01 onchange=${e=>setRiskPercent(Number(e.target.value))} />
+            <label style="margin-top:8px">Stop loss (pips or price points)</label>
+            <input type="number" value=${stopLossPips} min=0.1 step=0.1 onchange=${e=>setStopLossPips(Number(e.target.value))} />
+            <div className="note" style="margin-top:6px">Stop loss units: pips for forex majors (e.g., 20) or price points for crypto.</div>
+          </div>
+        </div>
+      </div>
+
+      <div className="card">
+        <div className="row">
+          <div className="col">
+            <label>Entry price</label>
+            <input placeholder="enter entry price" value=${entryPrice} onchange=${e=>setEntryPrice(e.target.value)} />
+            <label style="margin-top:8px">Side</label>
+            <div className="row"><select value=${side} onchange=${e=>setSide(e.target.value)}><option value="buy">Buy</option><option value="sell">Sell</option></select>
+            <input placeholder="note (optional)" value=${note} onchange=${e=>setNote(e.target.value)} style="flex:1" /></div>
+          </div>
+          <div style="min-width:220px;text-align:right">
+            <div className="muted">Suggested lot size</div>
+            <div style="font-weight:700;font-size:18px;margin-top:6px">${html`<button className="small" onclick=${async()=>{const s = await suggestLot(selected,Number(stopLossPips),Number(riskPercent)); alert('Suggested lots: '+(Math.round(s*100)/100))}}>Calc Lots</button>`}</div>
+            <div style="margin-top:10px"> 
+              <button className="btn" onclick=${handleOpen}>Open Trade (save locally)</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="card">
+        <h1>Open Trades</h1>
+        <div className="note">Open trades are stored locally. Close trades to realize PnL and update balance.</div>
+        <div style="margin-top:10px">
+          <table>
+            <thead><tr><th>Symbol</th><th>Side</th><th>Entry</th><th>SL(pips)</th><th>Lots</th><th>Opened</th><th>Actions</th></tr></thead>
+            <tbody>
+              ${trades.filter(t=>t.status==='open').map(t=> html`<tr key=${t.id}><td>${t.symbol}</td><td>${t.side}</td><td>${t.entry}</td><td>${t.stopLossPips}</td><td>${t.suggestedLots}</td><td>${new Date(t.openTs).toLocaleString()}</td><td><button className="small" onclick=${()=>handleClose(t.id)}>Close</button> <button className="small danger" onclick=${()=>removeTrade(t.id)}>Delete</button></td></tr>`)}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="card">
+        <h1>Trade History (closed)</h1>
+        <table>
+          <thead><tr><th>Symbol</th><th>Entry</th><th>Close</th><th>Lots</th><th>PnL (USD)</th><th>Closed</th></tr></thead>
+          <tbody>
+            ${trades.filter(t=>t.status==='closed').map(t=> html`<tr key=${t.id}><td>${t.symbol}</td><td>${t.entry}</td><td>${t.closePrice}</td><td>${t.suggestedLots}</td><td>${t.pnlUsd? t.pnlUsd.toFixed(2):'—'}</td><td>${new Date(t.closeTs).toLocaleString()}</td></tr>`)}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="card">
+        <h1>Notes & Tips</h1>
+        <div className="note">This is a frontend-only tracker that stores data in your browser (localStorage). It fetches live prices from public APIs (CoinGecko & exchangerate.host). To make it persistent across devices you can push the exported JSON into a simple backend or GitHub Gist and import it when needed.</div>
+        <div style="margin-top:8px"><button className="small" onclick=${()=>{alert('To deploy: create GitHub repo, add this index.html as root, push and enable GitHub Pages from main branch. I can provide step-by-step commands if you want.')}}>How to deploy</button></div>
+      </div>
+
+    </div>`
+  }
+
+  ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(App))
+  </script>
+</body>
+</html>
