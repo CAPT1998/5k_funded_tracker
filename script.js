@@ -1,9 +1,10 @@
 document.addEventListener('DOMContentLoaded', () => {
     // --- CONFIGURATION ---
-    const apiKey = 'ypuBeVKgcqUseVYcQM4I4yhq2zY2WPCo'; // <--- IMPORTANT: PASTE YOUR API KEY HERE
+    const apiKey = 'b420fde249404b1781820e99092ccfdd'; // <--- IMPORTANT: PASTE YOUR NEW TWELVE DATA API KEY HERE
     const initialBalance = 5000;
-    const majorForexPairs = ['EURUSD', 'GBPUSD', 'USDJPY', 'USDCHF', 'AUDUSD', 'USDCAD', 'NZDUSD'];
-    const majorCryptoPairs = ['BTCUSD', 'ETHUSD', 'XRPUSD', 'LTCUSD', 'BCHUSD', 'ADAUSD', 'SOLUSD'];
+    // Updated pair format for Twelve Data API (e.g., EUR/USD)
+    const majorForexPairs = ['EUR/USD', 'GBP/USD', 'USD/JPY', 'USD/CHF', 'AUD/USD', 'USD/CAD', 'NZD/USD'];
+    const majorCryptoPairs = ['BTC/USD', 'ETH/USD', 'XRP/USD', 'LTC/USD', 'BCH/USD', 'ADA/USD', 'SOL/USD'];
 
     // --- DOM ELEMENTS ---
     const balanceEl = document.getElementById('current-balance');
@@ -28,7 +29,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // --- INITIALIZATION ---
     function init() {
         if (apiKey === 'YOUR_API_KEY_HERE' || apiKey === '') {
-            alert('Please set your API key in script.js');
+            alert('Please set your Twelve Data API key in script.js');
         }
         loadState();
         populatePairs();
@@ -48,28 +49,33 @@ document.addEventListener('DOMContentLoaded', () => {
         localStorage.setItem('fundingChallengeState', JSON.stringify(state));
     }
 
-    // --- API & DATA FETCHING ---
+    // --- API & DATA FETCHING (using Twelve Data) ---
     async function fetchMarketData(pairs) {
         try {
-            // UPDATED aPI endpoint from v3 to v4
-            const url = `https://financialmodelingprep.com/api/v4/price/${pairs.join(',')}?apikey=${apiKey}`;
+            // Use the Twelve Data endpoint for real-time price
+            const url = `https://api.twelvedata.com/price?symbol=${pairs.join(',')}&apikey=${apiKey}`;
             const response = await fetch(url);
             if (!response.ok) throw new Error(`API Error: ${response.statusText}`);
             const data = await response.json();
 
-            // The v4 response structure might be slightly different. Adapt as needed.
-            // This assumes the response is an array of objects with a 'symbol' and 'price' property.
-            data.forEach(item => {
-                state.marketData[item.symbol] = {
-                    price: item.price,
-                    // Spread is not available in this endpoint, so we'll leave it as N/A
-                    spread: 'N/A' 
+            // Twelve Data returns an object with symbols as keys
+            for (const symbol in data) {
+                state.marketData[symbol] = {
+                    price: parseFloat(data[symbol].price),
+                    spread: 'N/A' // Spread is not provided in this endpoint
                 };
-            });
+            }
             updateMarketInfo();
         } catch (error) {
             console.error("Failed to fetch market data:", error);
             currentPriceEl.textContent = 'API Error';
+            // Handle cases where some symbols might fail
+             for (const pair of pairs) {
+                if (!state.marketData[pair]) {
+                   state.marketData[pair] = { price: 0, spread: 'N/A' };
+                }
+            }
+            updateMarketInfo();
         }
     }
 
@@ -105,18 +111,19 @@ document.addEventListener('DOMContentLoaded', () => {
             </tr>
         `).join('');
     }
-    
+
     function updateMarketInfo() {
         const selectedPair = pairSelectEl.value;
         const data = state.marketData[selectedPair];
-        if (data) {
-            currentPriceEl.textContent = data.price.toFixed(5);
+        if (data && data.price > 0) {
+            const price = data.price;
+            currentPriceEl.textContent = price.toFixed(5);
             currentSpreadEl.textContent = data.spread;
-            if (!entryPriceEl.value) {
-                entryPriceEl.value = data.price.toFixed(5);
+            if (!entryPriceEl.value || entryPriceEl.value === "0.00000") {
+                entryPriceEl.value = price.toFixed(5);
             }
         } else {
-            currentPriceEl.textContent = 'N/A';
+            currentPriceEl.textContent = 'Loading...';
             currentSpreadEl.textContent = 'N/A';
         }
         updateCalculations();
@@ -129,8 +136,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const entryPrice = parseFloat(entryPriceEl.value) || 0;
         const stopLossPrice = parseFloat(stopLossPriceEl.value) || 0;
         const selectedPair = pairSelectEl.value;
-        
-        if (riskPercent <= 0 || entryPrice <= 0 || stopLossPrice <= 0) {
+
+        if (riskPercent <= 0 || entryPrice <= 0 || stopLossPrice <= 0 || !selectedPair) {
             riskAmountEl.textContent = formatCurrency(0);
             lotSizeEl.textContent = '0.00';
             return;
@@ -139,33 +146,29 @@ document.addEventListener('DOMContentLoaded', () => {
         const riskAmount = balance * (riskPercent / 100);
         riskAmountEl.textContent = formatCurrency(riskAmount);
 
-        const stopLossPips = Math.abs(entryPrice - stopLossPrice);
+        // This calculation is for points/pips
+        const priceDifference = Math.abs(entryPrice - stopLossPrice);
+
+        // Pip value logic
         const isCrypto = majorCryptoPairs.includes(selectedPair);
+        const isJpyPair = selectedPair.includes('JPY');
+        const pointValue = isJpyPair ? 0.01 : 0.0001;
         
-        let pipValuePerLot = 10; // Standard for most USD-based forex pairs
-        if (selectedPair.includes('JPY')) {
-            pipValuePerLot = 1000 / state.marketData[selectedPair]?.price || 130;
-        } else if (isCrypto) {
-            pipValuePerLot = 1; // For crypto, 1 unit change = $1
+        let valuePerLot = 0;
+        if(isCrypto) {
+            // For crypto like BTC/USD, 1 point movement = $1. A lot size of 1 means 1 coin.
+            // Risk per lot = price difference * 1
+            valuePerLot = priceDifference;
+        } else {
+            // For forex, 1 standard lot (100,000 units)
+            // Pip value is approx $10 for XXX/USD pairs
+            const pips = priceDifference / pointValue;
+            valuePerLot = pips * 10; // Simplified: Assumes ~$10 per pip which is standard for XXX/USD pairs
         }
-        
-        // Simplified calculation
-        const moneyRiskPerLot = stopLossPips * (isCrypto ? 1 : getPipValue(selectedPair));
-        
-        const lotSize = (moneyRiskPerLot > 0) ? (riskAmount / moneyRiskPerLot) : 0;
-        
+
+        const lotSize = (valuePerLot > 0) ? (riskAmount / valuePerLot) : 0;
         lotSizeEl.textContent = lotSize.toFixed(2);
     }
-    
-    function getPipValue(pair) {
-        // This is a simplification. Real pip value depends on the quote currency.
-        if(pair.endsWith('USD')) return 10;
-        if(pair.startsWith('USD')) {
-            return 10 / (state.marketData[pair]?.price || 1);
-        }
-        return 10; // Default approximation
-    }
-
 
     // --- EVENT HANDLERS & ACTIONS ---
     function addEventListeners() {
@@ -215,20 +218,29 @@ document.addEventListener('DOMContentLoaded', () => {
         const exitPriceStr = prompt('Enter the closing price for this trade:');
         const exitPrice = parseFloat(exitPriceStr);
 
-        if (!exitPrice || isNaN(exitPrice)) {
-            alert('Invalid closing price.');
-            return;
+        if (exitPriceStr === null || isNaN(exitPrice)) {
+            return; // User cancelled or entered invalid input
         }
 
         const trade = state.trades.find(t => t.id === id);
         if (!trade) return;
-        
-        const pips = (exitPrice - trade.entryPrice) * (trade.type === 'BUY' ? 1 : -1);
-        const isCrypto = majorCryptoPairs.includes(trade.pair);
-        const contractSize = isCrypto ? 1 : 100000;
-        
-        const profitLoss = pips * contractSize * trade.lotSize;
 
+        const priceDifference = (exitPrice - trade.entryPrice) * (trade.type === 'BUY' ? 1 : -1);
+        const isCrypto = majorCryptoPairs.includes(trade.pair);
+        const isJpyPair = trade.pair.includes('JPY');
+        const pointValue = isJpyPair ? 0.01 : 0.0001;
+
+        let profitLoss = 0;
+        if (isCrypto) {
+            // For crypto, P/L = price difference * lot size (number of coins)
+            profitLoss = priceDifference * trade.lotSize;
+        } else {
+            // For forex, P/L = pips * pip value * lot size
+            const pips = priceDifference / pointValue;
+            const pipValue = 10; // Simplified pip value
+            profitLoss = pips * pipValue * trade.lotSize;
+        }
+        
         trade.status = 'closed';
         trade.exitPrice = exitPrice;
         trade.pl = profitLoss;
@@ -237,12 +249,17 @@ document.addEventListener('DOMContentLoaded', () => {
         saveAndRender();
     }
 
+
+
     function deleteTrade(id) {
         if (confirm('Are you sure you want to delete this trade? This cannot be undone.')) {
             const tradeIndex = state.trades.findIndex(t => t.id === id);
+            if (tradeIndex === -1) return;
+            
             const trade = state.trades[tradeIndex];
             
-            if(trade.status === 'closed' && trade.pl !== null){
+            // If the trade was closed, revert the balance change before deleting
+            if (trade.status === 'closed' && trade.pl !== null) {
                 state.balance -= trade.pl;
             }
 
@@ -250,7 +267,7 @@ document.addEventListener('DOMContentLoaded', () => {
             saveAndRender();
         }
     }
-    
+
     function saveAndRender() {
         saveState();
         render();
@@ -260,7 +277,7 @@ document.addEventListener('DOMContentLoaded', () => {
     function formatCurrency(value) {
         return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(value);
     }
-    
+
     // --- START THE APP ---
     init();
 });
